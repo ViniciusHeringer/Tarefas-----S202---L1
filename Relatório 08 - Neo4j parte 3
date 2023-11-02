@@ -1,0 +1,132 @@
+from neo4j import GraphDatabase
+
+class GameDatabase:
+    def __init__(self, uri, user, password):
+        self._driver = GraphDatabase.driver(uri, auth=(user, password))
+
+    def close(self):
+        self._driver.close()
+
+    def create_player(self, name):
+        with self._driver.session() as session:
+            session.write_transaction(self._create_player, name)
+
+    def _create_player(self, tx, name):
+        query = "CREATE (p:Player {name: $name}) RETURN p"
+        result = tx.run(query, name=name)
+        return result.single()
+
+    def get_players(self):
+        with self._driver.session() as session:
+            return session.read_transaction(self._get_players)
+
+    def _get_players(self, tx):
+        query = "MATCH (p:Player) RETURN p.name AS name, id(p) AS id"
+        result = tx.run(query)
+        return [record for record in result]
+
+    def get_player_by_id(self, player_id):
+        with self._driver.session() as session:
+            return session.read_transaction(self._get_player_by_id, player_id)
+
+    def _get_player_by_id(self, tx, player_id):
+        query = "MATCH (p:Player) WHERE id(p) = $player_id RETURN p.name AS name, id(p) AS id"
+        result = tx.run(query, player_id=player_id)
+        return result.single()
+
+    def update_player(self, player_id, new_name):
+        with self._driver.session() as session:
+            session.write_transaction(self._update_player, player_id, new_name)
+
+    def _update_player(self, tx, player_id, new_name):
+        query = "MATCH (p:Player) WHERE id(p) = $player_id SET p.name = $new_name RETURN p"
+        result = tx.run(query, player_id=player_id, new_name=new_name)
+        return result.single()
+
+    def delete_player(self, player_id):
+        with self._driver.session() as session:
+            session.write_transaction(self._delete_player, player_id)
+
+    def _delete_player(self, tx, player_id):
+        query = "MATCH (p:Player) WHERE id(p) = $player_id DETACH DELETE p"
+        tx.run(query, player_id=player_id)
+
+    def create_match(self, player_ids, result):
+        with self._driver.session() as session:
+            session.write_transaction(self._create_match, player_ids, result)
+
+    def _create_match(self, tx, player_ids, result):
+        query = (
+            "CREATE (m:Match {result: $result})"
+            "WITH m "
+            "UNWIND $player_ids AS player_id "
+            "MATCH (p:Player) WHERE id(p) = player_id "
+            "CREATE (p)-[:PARTICIPATED_IN]->(m) "
+            "RETURN m"
+        )
+        result = tx.run(query, player_ids=player_ids, result=result)
+        return result.single()
+
+    def get_match(self, match_id):
+        with self._driver.session() as session:
+            return session.read_transaction(self._get_match, match_id)
+
+    def _get_match(self, tx, match_id):
+        query = (
+            "MATCH (m:Match) WHERE id(m) = $match_id "
+            "OPTIONAL MATCH (p:Player)-[:PARTICIPATED_IN]->(m) "
+            "RETURN m.result AS result, collect({name: p.name, id: id(p)}) AS players"
+        )
+        result = tx.run(query, match_id=match_id)
+        record = result.single()
+        if record:
+            return {
+                'result': record['result'],
+                'players': [{'name': p['name'], 'id': p['id']} for p in record['players']]
+            }
+        return None
+
+    def get_player_match_history(self, player_id):
+        with self._driver.session() as session:
+            return session.read_transaction(self._get_player_match_history, player_id)
+
+    def _get_player_match_history(self, tx, player_id):
+        query = (
+            "MATCH (p:Player)-[:PARTICIPATED_IN]->(m:Match) "
+            "WHERE id(p) = $player_id "
+            "RETURN id(m) AS match_id, m.result AS result"
+        )
+        result = tx.run(query, player_id=player_id)
+        return [{'match_id': record['match_id'], 'result': record['result']} for record in result]
+
+
+if __name__ == "__main__":
+    db = GameDatabase("bolt://localhost:7687", "neo4j", "your_password")
+
+    db.create_player("Player1")
+    db.create_player("Player2")
+    db.create_player("Player3")
+
+    players = db.get_players()
+    for player in players:
+        print(f"Player ID: {player['id']}, Name: {player['name']}")
+
+    db.update_player(1, "UpdatedPlayer1")
+
+    db.delete_player(3)
+
+    db.create_match([1, 2], "Player1 Wins")
+
+    match_info = db.get_match(1)
+    if match_info:
+        print(f"Match Result: {match_info['result']}")
+        print("Players:")
+        for player in match_info['players']:
+            print(f"Player ID: {player['id']}, Name: {player['name']}")
+
+    player_history = db.get_player_match_history(1)
+    print("Match History for Player 1:")
+    for match in player_history:
+        print(f"Match ID: {match['match_id']}, Result: {match['result']}")
+
+    db.close()
